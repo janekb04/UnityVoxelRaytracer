@@ -1,0 +1,112 @@
+﻿#pragma kernel CSMain
+
+RWTexture2D<float4> Result;
+Texture3D world;
+float4x4 cameraToWorld;
+float4x4 cameraInverseProjection;
+Texture2D<float4> skyboxTexture;
+SamplerState samplerskyboxTexture;
+static const float PI = 3.14159265f;
+float2 PixelOffset;
+static const int ITER_COUNT = 512;
+
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+    float3 energy;
+};
+
+struct Material
+{
+    float3 albedo;
+    float3 specular;
+    float smoothness;
+    float3 emission;
+};
+
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    ray.energy = float3(1.0f, 1.0f, 1.0f);
+    return ray;
+}
+
+Ray CreateCameraRay(float2 uv)
+{
+    float3 origin = mul(cameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+
+    float3 direction = mul(cameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    direction = mul(cameraToWorld, float4(direction, 0.0f)).xyz;
+    direction = normalize(direction);
+
+    return CreateRay(origin, direction);
+}
+
+float3 roundParam(float3 val, float3 dir)
+{
+    float3 dirSign = sign(dir);
+    return dirSign * floor(dirSign * val) + dirSign;
+}
+
+float3 ShadeVolumeVoxel(int3 voxelPos, inout Ray ray, float distance)
+{
+    return float3(0, 0, 0);
+}
+
+float3 ShadeHitVoxel(int3 hitVoxelPos, float3 hitPos, inout Ray ray, bool3 mask)
+{
+    bool hit = world[hitVoxelPos].r != 0;
+    float3 specular = float3(0.6f, 0.6f, 0.6f);
+    ray.energy -= ray.energy * (float3(1.0, 1.0, 1.0) - specular) * hit;
+    ray.origin = hitPos;
+    ray.direction += ray.direction * -2 * mask * hit; // Bounce if hit
+    return float3(0, 0, 0);
+}
+
+float3 Trace(Ray ray, int iter)
+{
+    float3 result = float3(0, 0, 0);
+
+    for (int i = 0; i < iter; ++i)
+    {
+        float3 t = (roundParam(ray.origin, ray.direction) - ray.origin) / ray.direction;
+        float minT = min(t.x, min(t.y, t.z));
+        bool3 mask = (t <= float3(minT, minT, minT));
+
+        float3 deltaPos = ray.direction * minT;
+        float3 hitPos = ray.origin + deltaPos;
+        float distanceCoveredInCurrentVoxel = length(deltaPos);
+        int3 currentVoxelPos = ray.origin;
+        result += ray.energy * ShadeVolumeVoxel(currentVoxelPos, ray, distanceCoveredInCurrentVoxel);
+
+        int3 hitVoxelPos = hitPos + sign(ray.direction) * 0.5 * mask;
+        result += ray.energy * ShadeHitVoxel(hitVoxelPos, hitPos, ray, mask);
+    }
+
+    float theta = acos(ray.direction.y) / -PI;
+    float phi = atan2(ray.direction.x, -ray.direction.z) / -PI * 0.5f;
+    result += ray.energy * skyboxTexture.SampleLevel(samplerskyboxTexture, float2(phi, theta), 0).rgb;
+
+    return result;
+}
+
+float2 OffsetSample(float2 sampleCoord)
+{
+    return sampleCoord + PixelOffset;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+
+    float2 uv = float2((OffsetSample(id.xy)) / float2(width, height) * 2.0f - 1.0f);
+
+    Ray ray = CreateCameraRay(uv);
+
+    Result[id.xy] = float4(Trace(ray, ITER_COUNT), 0);
+}
